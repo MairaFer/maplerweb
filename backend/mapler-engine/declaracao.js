@@ -1,5 +1,11 @@
+/**
+ * Nos da AST: linha identifica a linha no fonte; tipo identifica a classe do no.
+ * Tokens possuem lexema, tipo e linha. Os nos guardam dados, sem executar o programa.
+ * aceitar(visitante) chama visitarX; o retorno pode ser uma Promise.
+ */
 // declaracao.js - Com suporte ao Padrão Visitor
 
+/** Raiz: variaveis: VarDeclaracoes[]; corpo: nos[]; modulos: Modulo[]; fim: Fim. */
 export class Programa {
   constructor(linha, variaveis, corpo, modulos, fim) {
     this.tipo = 'Programa';
@@ -14,6 +20,7 @@ export class Programa {
   }
 }
 
+/** token: Token de fechamento. */
 export class Fim {
   constructor(linha, token) {
     this.tipo = 'Fim';
@@ -25,6 +32,7 @@ export class Fim {
   }
 }
 
+/** variavel: Variavel ou VariavelArray. */
 export class Ler {
   constructor(linha, variavel) {
     this.tipo = 'Ler';
@@ -36,6 +44,7 @@ export class Ler {
   }
 }
 
+/** expressoes: lista de expressoes. */
 export class Escreva {
   constructor(linha, expressoes) {
     this.tipo = 'Escreva';
@@ -47,6 +56,7 @@ export class Escreva {
   }
 }
 
+/** nome e tipoDado: Tokens. dimensoes: tamanhos positivos; indices a partir de zero. */
 export class Var {
   constructor(linha, nome, tipo, dimensoes = []) {
     this.tipo = 'Var';
@@ -60,6 +70,7 @@ export class Var {
   }
 }
 
+/** variaveis: Var[]. */
 export class VarDeclaracoes {
   constructor(linha, variaveis) {
     this.tipo = 'VarDeclaracoes';
@@ -71,6 +82,7 @@ export class VarDeclaracoes {
   }
 }
 
+/** declaracoes: lista de declaracoes ou expressoes. */
 export class Bloco {
   constructor(linha, declaracoes) {
     this.tipo = 'Bloco';
@@ -82,6 +94,7 @@ export class Bloco {
   }
 }
 
+/** condicao: expressao; entaoBloco: Bloco; senaoBloco: Bloco ou null. */
 export class Se {
   constructor(linha, condicao, entaoBloco, senaoBloco) {
     this.tipo = 'Se';
@@ -95,6 +108,7 @@ export class Se {
   }
 }
 
+/** condicao: expressao; corpo: Bloco. */
 export class Enquanto {
   constructor(linha, condicao, corpo) {
     this.tipo = 'Enquanto';
@@ -107,6 +121,7 @@ export class Enquanto {
   }
 }
 
+/** inicializacao e incremento: atribuicoes; condicao: expressao; corpo: Bloco. */
 export class Para {
   constructor(linha, inicializacao, condicao, incremento, corpo) {
     this.tipo = 'Para';
@@ -121,6 +136,7 @@ export class Para {
   }
 }
 
+/** corpo: Bloco, executado antes de testar condicao: expressao. */
 export class Repita {
   constructor(linha, corpo, condicao) {
     this.tipo = 'Repita';
@@ -133,8 +149,7 @@ export class Repita {
   }
 }
 
-// Nota: No Java original, Modulo não tem parâmetros no parser.
-// Mantive os parâmetros para suportar a tua evolução, mas o padrão Visitor chama 'visitarModulo'
+/** nome: Token; parametros: { nome: Token, tipo: Token }[]; corpo: Bloco. */
 export class Modulo {
   constructor(linha, nome, parametros, corpo) {
     this.tipo = 'Modulo';
@@ -148,17 +163,20 @@ export class Modulo {
   }
 }
 
+/** Comando: identificador: Token; argumentos: expressoes[]. Chamada (expressao.js) permite usar o retorno em outra expressao. */
 export class ChamadaModulo {
-  constructor(linha, identificador) {
+  constructor(linha, identificador, argumentos = []) {
     this.tipo = 'ChamadaModulo';
     this.linha = linha;
     this.identificador = identificador; // Token
+    this.argumentos = argumentos;
   }
   aceitar(visitante) {
     return visitante.visitarChamadaModulo(this);
   }
 }
 
+/** valor: expressao ou null. */
 export class Retorne {
   constructor(linha, valor) {
     this.tipo = 'Retorne';

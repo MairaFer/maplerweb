@@ -25,6 +25,7 @@ export class TranspiladorPython {
 
     transpilar(ast) {
         this.escritor.reset();
+        this.tipos = new Map();
         if (ast && ast.aceitar) ast.aceitar(this);
         return this.escritor.getResultado();
     }
@@ -62,25 +63,33 @@ const res = this.visitar(stmt);
     }
 
     visitarVarDeclaracoes(no) {
-        for (const v of no.variaveis) {
-            if (v.tipoDado.tipo === 'TIPO_MODULO') continue;
-            let valor = "None";
-            if (v.dimensoes.length > 0) {
-                const tam = v.dimensoes[0];
-                valor = v.dimensoes.length > 1 
-                    ? `[[None]*${v.dimensoes[1]} for _ in range(${tam})]` 
-                    : `[None]*${tam}`;
-            }
-            this.escritor.adicionarLinha(`${v.nome.lexema} = ${valor}`);
-        }
+        for (const variavel of no.variaveis) this.visitar(variavel);
     }
 
+    visitarVar(no) {
+        this.tipos ??= new Map();
+        this.tipos.set(no.nome.lexema, no.tipoDado.tipo);
+        if (no.tipoDado.tipo === 'TIPO_MODULO') return;
+        let valor = 'None';
+        for (const tamanho of [...no.dimensoes].reverse()) {
+            if (!Number.isSafeInteger(tamanho) || tamanho <= 0) throw new Error('Dimensao invalida.');
+            valor = `[${valor} for _ in range(${tamanho})]`;
+        }
+        this.escritor.adicionarLinha(`${no.nome.lexema} = ${valor}`);
+    }
+
+    visitarFim() { return null; }
+
     visitarModulo(no) {
+        const tiposAnteriores = this.tipos;
+        this.tipos = new Map(this.tipos);
+        for (const p of no.parametros) this.tipos.set(p.nome.lexema, p.tipo.tipo);
         const params = no.parametros.map(p => p.nome.lexema).join(", ");
         this.escritor.adicionarLinha(`def ${no.nome.lexema}(${params}):`);
         this.escritor.indentar();
         this.visitar(no.corpo);
         this.escritor.removerIndentacao();
+        this.tipos = tiposAnteriores;
     }
 
     visitarBloco(no) {
@@ -103,10 +112,14 @@ const res = this.visitar(stmt);
     }
 
     visitarLer(no) {
-        const nome = no.variavel.nome.lexema;
-        this.escritor.adicionarLinha(`${nome} = input()`);
-        this.escritor.adicionarLinha(`try: ${nome} = int(${nome})`);
-        this.escritor.adicionarLinha(`except: pass`);
+        const nome = this.visitar(no.variavel);
+        const tipo = this.tipos.get(no.variavel.nome.lexema);
+        const conversores = {
+            TIPO_INTEIRO: 'int(input())',
+            TIPO_REAL: 'float(input())',
+            TIPO_LOGICO: "{'verdadeiro': True, 'falso': False}[input().lower()]",
+        };
+        this.escritor.adicionarLinha(`${nome} = ${conversores[tipo] || 'input()'}`);
     }
 
     visitarSe(no) {
@@ -153,7 +166,7 @@ const res = this.visitar(stmt);
     }
 
    visitarChamadaModulo(no) {
-        return `${no.identificador.lexema}()`;
+        return `${no.identificador.lexema}(${(no.argumentos || []).map(a => this.visitar(a)).join(", ")})`;
     }
     // Expressões
     visitarAtribuicao(no) { return `${no.nome.lexema} = ${this.visitar(no.valor)}`; }
@@ -178,5 +191,6 @@ const res = this.visitar(stmt);
     }
     visitarLogico(no) { return this.visitarBinario(no); }
     visitarUnario(no) { return `${this.operadores.get(no.operador.tipo)}(${this.visitar(no.direita)})`; }
+    visitarGrupo(no) { return `(${this.visitar(no.expressao)})`; }
     visitarExpParentizada(no) { return `(${this.visitar(no.grupo.expressao)})`; }
 }

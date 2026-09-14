@@ -64,6 +64,12 @@ export class Ambiente {
     throw new Error(`Erro em tempo de execucao: Variavel indefinida '${nome}'. (Linha: ${tokenNome.linha})`);
   }
 
+  obterTipo(tokenNome) {
+    if (this.tipos.has(tokenNome.lexema)) return this.tipos.get(tokenNome.lexema);
+    if (this.enclosing) return this.enclosing.obterTipo(tokenNome);
+    throw new Error(`Variavel indefinida '${tokenNome.lexema}'. (Linha: ${tokenNome.linha})`);
+  }
+
   _obterTipoDoValor(valor) {
     // Helper simples se não quiser importar do checadorTipos.js, 
     // mas o ideal é usar a importação.
@@ -72,7 +78,17 @@ export class Ambiente {
     }
     if (typeof valor === 'string') return 'TIPO_CADEIA';
     if (typeof valor === 'boolean') return 'TIPO_LOGICO';
-    if (Array.isArray(valor)) return 'TIPO_VETOR';
+   
+    if (Array.isArray(valor)) {
+
+        if (valor.length === 0)
+            return "TIPO_VETOR";
+
+        return {
+            tipo: "TIPO_VETOR",
+            elemento: this._obterTipoDoValor(valor[0])
+        };
+    }
     if (valor && typeof valor === 'object' && valor.constructor.name === 'ModuloChamavel') return 'TIPO_MODULO';
     return 'DESCONHECIDO';
   }

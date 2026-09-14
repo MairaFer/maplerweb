@@ -1,7 +1,7 @@
  // interpretador.js
 //import { Vetor } from '../vetor.js';
 import { Ambiente } from './ambiente.js';
-//import { obterTipoDoValor, converterInputString } from '../checadorTipos.js';
+import { converterInputString } from './checadorTipos.js';
 
 // Classe auxiliar para guardar a definição de um módulo e torná-lo "chamável"
 class ModuloChamavel {
@@ -145,9 +145,51 @@ export class Interpretador {
 
     async visitarVarDeclaracoes(declaracao) {
         for (const variavel of declaracao.variaveis) {
-            const valorInicial = null;
-            this.ambiente.definir(variavel.nome.lexema, variavel.tipoDado.tipo, valorInicial);
+            await this.executarDeclaracao(variavel);
         }
+    }
+
+    visitarVar(declaracao) {
+        const criar = (nivel) => {
+            if (nivel === declaracao.dimensoes.length) return null;
+            const tamanho = declaracao.dimensoes[nivel];
+            if (!Number.isSafeInteger(tamanho) || tamanho <= 0) throw new Error('Dimensao invalida.');
+            return Array.from({ length: tamanho }, () => criar(nivel + 1));
+        };
+        this.ambiente.definir(declaracao.nome.lexema, declaracao.tipoDado.tipo, criar(0));
+    }
+
+    async resolverElemento(expr) {
+        let recipiente = this.ambiente.obter(expr.nome);
+        if (!expr.indices.length) throw new Error('Esperado indice do vetor.');
+        for (let nivel = 0; nivel < expr.indices.length; nivel++) {
+            const indice = await this.avaliarExpressao(expr.indices[nivel]);
+            if (!Array.isArray(recipiente)) throw new Error(`Quantidade de indices invalida para '${expr.nome.lexema}'.`);
+            if (!Number.isInteger(indice) || indice < 0 || indice >= recipiente.length) {
+                throw new Error(`Indice fora dos limites de '${expr.nome.lexema}': ${indice}.`);
+            }
+            if (nivel === expr.indices.length - 1) {
+                if (Array.isArray(recipiente[indice])) throw new Error(`Faltam indices para '${expr.nome.lexema}'.`);
+                return { recipiente, indice };
+            }
+            recipiente = recipiente[indice];
+        }
+    }
+
+    async visitarVariavelArray(expr) {
+        const { recipiente, indice } = await this.resolverElemento(expr);
+        return recipiente[indice];
+    }
+
+    async visitarAtribuicaoArray(expr) {
+        const { recipiente, indice } = await this.resolverElemento(expr);
+        const valor = await this.avaliarExpressao(expr.valor);
+        // Reutiliza a validacao de tipos das atribuicoes escalares.
+        const validacao = new Ambiente();
+        validacao.definir(expr.nome.lexema, this.ambiente.obterTipo(expr.nome));
+        validacao.atribuir(expr.nome, valor);
+        recipiente[indice] = valor;
+        return valor;
     }
 
     async visitarExpressao(declaracao) {
@@ -211,50 +253,20 @@ export class Interpretador {
         } while (!(await this.avaliarExpressao(declaracao.condicao)));
     }
 
-async visitarLer(declaracao) {
-    if (!this.entradas || this.entradas.length === 0) {
-        if (this.eventosService) {
-            this.eventosService.notificar('INPUT_SOLICITADO');
+    async visitarLer(declaracao) {
+        if (!this.entradas.length) {
+            this.eventosService?.notificar('INPUT_SOLICITADO');
+            throw new Error('Nenhuma entrada foi fornecida para o comando ler.');
         }
-        throw new Error('Nenhuma entrada foi fornecida para o comando ler.');
+        const alvo = declaracao.variavel;
+        const tipo = this.ambiente.obterTipo(alvo.nome);
+        const valor = converterInputString(String(this.entradas.shift()), tipo);
+        if (alvo.tipo === 'VariavelArray') {
+            return this.visitarAtribuicaoArray({ ...alvo, valor: { tipo: 'Literal', valor } });
+        }
+        return this.ambiente.atribuir(alvo.nome, valor);
     }
 
-    const valorLidoBruto = this.entradas.shift();
-
-    if (declaracao.variavel?.tipo === 'Variavel') {
-        const nomeVariavel = declaracao.variavel.nome;
-
-        // Apenas verifica se a variável existe no ambiente
-        try {
-            this.ambiente.obter(nomeVariavel);
-        } catch (erro) {
-            throw new Error(`Variável '${nomeVariavel.lexema}' não foi declarada.`);
-        }
-
-        let valorConvertido = valorLidoBruto;
-
-        // Conversão simples automática
-        if (!isNaN(valorLidoBruto) && valorLidoBruto !== '') {
-            if (String(valorLidoBruto).includes('.')) {
-                valorConvertido = parseFloat(valorLidoBruto);
-            } else {
-                valorConvertido = parseInt(valorLidoBruto, 10);
-            }
-        } else if (String(valorLidoBruto).toLowerCase() === 'verdadeiro') {
-            valorConvertido = true;
-        } else if (String(valorLidoBruto).toLowerCase() === 'falso') {
-            valorConvertido = false;
-        } else {
-            valorConvertido = String(valorLidoBruto);
-        }
-
-        this.ambiente.atribuir(nomeVariavel, valorConvertido);
-        return;
-    }
-
-    throw new Error('Leitura de vetor ainda não implementada neste MVP.');
-}
-    
     async visitarModulo(declaracao) {
         const modulo = new ModuloChamavel(declaracao);
         // ATRIBUI a definição do módulo à variável já declarada.
@@ -262,16 +274,11 @@ async visitarLer(declaracao) {
     }
 
     async visitarChamadaModulo(declaracao) {
-        const moduloChamavel = this.ambiente.obter(declaracao.identificador);
-        if (moduloChamavel && moduloChamavel instanceof ModuloChamavel) {
-            await moduloChamavel.chamar(this);
-        } else {
-            throw new Error(`Erro: '${declaracao.identificador.lexema}' nao e um modulo chamavel ou nao foi definido.`);
-        }
-        return await moduloChamavel.chamar(this, []);
+        return this.visitarChamada({
+            callee: { tipo: 'Variavel', nome: declaracao.identificador },
+            argumentos: declaracao.argumentos || [],
+        });
     }
-
-    // --- MÉTODOS DE VISITAÇÃO PARA EXPRESSÕES ---
 
     visitarLiteral(expr) {
     return expr.valor;
