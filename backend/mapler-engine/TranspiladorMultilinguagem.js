@@ -1,4 +1,5 @@
 // Geração a partir da AST: nenhuma substituição textual do código-fonte.
+import { criarNomesDestino } from './NomesDestino.js';
 export const LINGUAGENS = Object.freeze({
   c: { nome: 'C', arquivo: 'programa.c' },
   cpp: { nome: 'C++', arquivo: 'programa.cpp' },
@@ -27,7 +28,7 @@ export class TranspiladorMultilinguagem {
   linha(texto = '') { this.linhas.push('    '.repeat(this.nivel) + texto); }
   nome(nome, modulo = false) {
     const chave = `${modulo ? 'f' : 'v'}:${nome}`;
-    if (!this.nomes.has(chave)) this.nomes.set(chave, `m_${nome.replace(/[^a-zA-Z0-9_]/g, '_')}_${this.nomes.size}`);
+    if (!this.nomes.has(chave)) this.nomes.set(chave, this.alocarNome(nome));
     const id = this.nomes.get(chave);
     return this.lang === 'ruby' && !modulo && !this.parametros.has(nome) ? `$${id}` : id;
   }
@@ -82,6 +83,13 @@ export class TranspiladorMultilinguagem {
   }
 
   transpilar(ast) {
+    const originais = [];
+    this.visitarNos(ast, no => { if (no.nome?.lexema) originais.push(no.nome.lexema); });
+    for (const modulo of ast.modulos) for (const parametro of modulo.parametros) originais.push(parametro.nome.lexema);
+    this.alocarNome = criarNomesDestino(this.lang, originais);
+    this.temLeitura = false;
+    this.visitarNos(ast, no => { if (no.tipo === 'Ler') this.temLeitura = true; });
+    this.auxiliares = [];
     this.linhas = []; this.nivel = 0; this.nomes = new Map(); this.parametros = new Set();
     this.globais = new Map(); this.retornos = new Map();
     this.modulos = new Map(ast.modulos.map(m => [m.nome.lexema, m]));
@@ -109,12 +117,31 @@ export class TranspiladorMultilinguagem {
       }
     }
     for (const m of ast.modulos) if (this.retornos.get(m.nome.lexema) === 'unknown') this.falha(m, 'Não foi possível inferir o tipo de retorno do módulo.');
+    this.cNativo = this.lang === 'c';
+    this.leituraTexto = false;
+    this.leituraNumero = false;
+    const analisarC = no => {
+      if (no.tipo === 'Ler') {
+        if (this.tipo(no.variavel) === 'text') this.leituraTexto = true;
+        else this.leituraNumero = true;
+      }
+      if (no.tipo === 'Binario' && no.operador.tipo === 'MAIS' && this.tipo(no) === 'text') this.cNativo = false;
+    };
+    this.escopoModulo(null);
+    this.visitarNos(ast.corpo, analisarC);
+    for (const m of ast.modulos) {
+      this.escopoModulo(m);
+      if (this.retornos.get(m.nome.lexema) === 'text' || m.parametros.some(p => this.tipoToken(p.tipo) === 'text')) this.cNativo = false;
+      this.visitarNos(m.corpo, analisarC);
+    }
+    this.variaveisLocais = this.cNativo && ast.modulos.length === 0;
     this.escopoModulo(null);
     this.cabecalho();
-    if (this.lang === 'java') { this.linha('public class Programa {'); this.nivel++; this.linha('static final java.util.Scanner entrada = new java.util.Scanner(System.in);'); }
+    if (this.lang === 'java') { this.linha('public class Programa {'); this.nivel++; if (this.temLeitura) this.linha('static final java.util.Scanner entrada = new java.util.Scanner(System.in);'); }
     if (this.lang !== 'pascal') this.ajudantes();
     if (this.lang === 'pascal' && this.variaveis.length) this.linha('var');
-    for (const v of this.variaveis) this.declarar(v);
+    if (!this.variaveisLocais) for (const v of this.variaveis) this.declarar(v);
+    if (this.cNativo && !this.variaveisLocais && this.leituraNumero && this.leituraTexto) this.linha('char entrada[4096];');
     if (this.lang === 'pascal') this.ajudantes();
     this.linha();
     if (['c', 'cpp', 'pascal'].includes(this.lang)) for (const m of ast.modulos) this.linha(this.assinatura(m) + (this.lang === 'pascal' ? '; forward;' : ';'));
@@ -126,34 +153,90 @@ export class TranspiladorMultilinguagem {
     else if (this.lang === 'pascal') this.linha('begin');
     else if (this.lang === 'python') this.linha('if __name__ == "__main__":');
     if (['java', 'c', 'cpp', 'pascal', 'python'].includes(this.lang)) this.nivel++;
-    if (this.lang === 'pascal') this.linha("DefaultFormatSettings.DecimalSeparator := '.';");
-    if (this.lang === 'cpp') this.linha('std::cout << std::setprecision(15);');
+    if (this.variaveisLocais) {
+      for (const v of this.variaveis) this.declarar(v);
+      if (this.leituraNumero && this.leituraTexto) this.linha('char entrada[4096];');
+      if (this.variaveis.length) this.linha();
+    }
     this.bloco(ast.corpo);
     if (['c', 'cpp'].includes(this.lang)) this.linha('return 0;');
     if (['java', 'c', 'cpp', 'pascal', 'python'].includes(this.lang)) this.nivel--;
     if (['java', 'c', 'cpp'].includes(this.lang)) this.linha('}');
     if (this.lang === 'pascal') this.linha('end.');
     if (this.lang === 'java') { this.nivel--; this.linha('}'); }
-    return this.linhas.join('\n') + '\n';
+    return this.finalizar();
   }
 
   cabecalho() {
-    const comentario = ['python', 'ruby', 'coffeescript'].includes(this.lang) ? '#' : '//';
-    this.linha(`${comentario} Gerado pelo MAPLER — ${LINGUAGENS[this.lang].nome}`);
-    if (this.lang === 'c') this.linha('#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdbool.h>\n#include <math.h>');
-    if (this.lang === 'cpp') this.linha('#include <iostream>\n#include <string>\n#include <cmath>\n#include <cstdlib>\n#include <stdexcept>\n#include <sstream>\n#include <iomanip>');
-    if (this.lang === 'pascal') this.linha('program Programa;\n{$mode objfpc}{$H+}{$codepage utf8}\nuses SysUtils, Math;');
-    if (this.lang === 'python') this.linha('import math');
-    if (this.js) {
+    this.linha('@@MAPLER_HEADER@@');
+    if (this.js && this.temLeitura) {
       if (this.lang === 'typescript') this.linha('declare function require(id: string): { readFileSync(fd: number, encoding: string): string };');
       this.linha('const maplerEntradas = require("fs").readFileSync(0, "utf8").replace(/\\r\\n?/g, "\\n").split("\\n");');
       this.linha('let maplerIndice = 0;');
     }
-    if (this.lang === 'coffeescript') this.linha('maplerEntradas = require("fs").readFileSync(0, "utf8").replace(/\\r\\n?/g, "\\n").split("\\n")\nmaplerIndice = 0');
+    if (this.lang === 'coffeescript' && this.temLeitura) this.linha('maplerEntradas = require("fs").readFileSync(0, "utf8").replace(/\\r\\n?/g, "\\n").split("\\n")\nmaplerIndice = 0');
     this.linha();
   }
 
   ajudantes() {
+    const programa = this.linhas;
+    this.linhas = [];
+    this.emitirAjudantes();
+    for (const trecho of this.linhas) {
+      // Cada declaração fica independente, inclusive nos destinos com indentação.
+      for (const codigo of trecho.split(/\n(?=(?:def |function |mapler\w+ =))/)) {
+        const nome = codigo.match(/\b(mapler\w+)(?=\s*(?:\(|=|:|\n|$))/)?.[1] ?? (codigo.includes('typedef struct') ? 'MaplerTexto' : null);
+        if (nome) this.auxiliares.push({ nome, codigo });
+      }
+    }
+    this.linhas = programa;
+    this.linha('@@MAPLER_HELPERS@@');
+  }
+
+  finalizar() {
+    const identificadores = codigo => codigo.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, ' ');
+    let corpo = this.linhas.join('\n');
+    const necessarios = new Set();
+    let referencias = identificadores(corpo);
+    // Inclui dependências transitivas: ler texto, por exemplo, precisa do tipo e do construtor.
+    for (let rodada = 0; rodada < this.auxiliares.length; rodada++) {
+      let mudou = false;
+      for (const ajuda of this.auxiliares) {
+        if (!necessarios.has(ajuda.nome) && new RegExp(`\\b${ajuda.nome}\\b`).test(referencias)) {
+          necessarios.add(ajuda.nome);
+          referencias += '\n' + identificadores(ajuda.codigo);
+          mudou = true;
+        }
+      }
+      if (!mudou) break;
+    }
+    corpo = corpo.replace(/^[ \t]*@@MAPLER_HELPERS@@/m, this.auxiliares.filter(a => necessarios.has(a.nome)).map(a => a.codigo).join('\n'));
+    const usado = identificadores(corpo);
+    let cabecalho = '';
+    if (this.lang === 'c' || this.lang === 'cpp') {
+      const bibliotecas = this.lang === 'c' ? [
+        ['stdio.h', /\b(?:puts|fputs|printf|scanf|putchar|fgets|snprintf|stdin|stdout|stderr)\b/],
+        ['stdlib.h', /\b(?:exit|strtoll|strtod|NULL)\b/],
+        ['string.h', /\b(?:strlen|strcpy|strcat|strcspn|strcmp)\b/],
+        ['stdbool.h', /\b(?:bool|true|false)\b/],
+        ['math.h', /\b(?:pow|fmod|trunc|isfinite)\b/],
+      ] : [
+        ['iostream', /std::(?:cout|cin|endl)/], ['string', /std::(?:string|getline|stoll|stod)/],
+        ['cmath', /std::(?:pow|fmod|trunc|isfinite)/], ['cstdlib', /\bexit\b/],
+        ['stdexcept', /std::runtime_error/], ['sstream', /std::ostringstream/], ['iomanip', /std::setprecision/],
+      ];
+      cabecalho = bibliotecas.filter(([, regex]) => regex.test(usado)).map(([nome]) => `#include <${nome}>`).join('\n');
+    } else if (this.lang === 'python' && /\bmath\./.test(usado)) cabecalho = 'import math';
+    else if (this.lang === 'pascal') {
+      const units = [];
+      if (/\b(?:Exception|StrToInt64|StrToFloat|IntToStr|FloatToStr|LowerCase)\b/.test(usado)) units.push('SysUtils');
+      if (/\b(?:Power|IsNan|IsInfinite)\b/.test(usado)) units.push('Math');
+      cabecalho = 'program Programa;\n{$mode objfpc}{$H+}{$codepage utf8}' + (units.length ? `\nuses ${units.join(', ')};` : '');
+    }
+    return corpo.replace('@@MAPLER_HEADER@@', cabecalho).replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n').trim() + '\n';
+  }
+
+  emitirAjudantes() {
     // Funções pequenas para manter a leitura e a apresentação de booleanos consistentes.
     if (this.lang === 'c') {
       this.linha('typedef struct { char dados[4096]; } MaplerTexto;');
@@ -201,7 +284,7 @@ export class TranspiladorMultilinguagem {
     if (tipo === 'bool') return valor;
     if (tipo === 'void') this.falha(no, 'Condição sem valor.');
     if (tipo !== 'text') return `(${valor} ${this.lang === 'pascal' ? '<>' : '!='} 0)`;
-    if (this.lang === 'c') return `(strlen(${valor}.dados) > 0)`;
+    if (this.lang === 'c') return `(strlen(${valor}${this.cNativo ? '' : '.dados'}) > 0)`;
     if (this.lang === 'cpp' || this.lang === 'java') return `(!${valor}.${this.lang === 'java' ? 'isEmpty' : 'empty'}())`;
     if (this.lang === 'pascal') return `(Length(${valor}) > 0)`;
     if (this.lang === 'python') return `bool(${valor})`;
@@ -225,12 +308,13 @@ export class TranspiladorMultilinguagem {
     if (this.lang === 'pascal') return "'" + valor.replace(/'/g, "''").replace(/\r/g, "'#13'").replace(/\n/g, "'#10'").replace(/\t/g, "'#9'") + "'";
     let literal = JSON.stringify(valor);
     if (['ruby', 'coffeescript'].includes(this.lang)) literal = literal.replace(/#\{/g, '\\#{');
-    if (this.lang === 'c') return `maplerTexto(${literal})`;
+    if (this.lang === 'c') return this.cNativo ? literal : `maplerTexto(${literal})`;
     if (this.lang === 'cpp') return `std::string(${literal})`;
     return literal;
   }
   declarar(v) {
     const nome = this.nome(v.nome.lexema), tipo = this.tipoToken(v.tipoDado), dims = v.dimensoes;
+    if (this.cNativo && tipo === 'text') { this.linha(`char ${nome}${dims.map(d => `[${d}]`).join('')}[4096] = {0};`); return; }
     if (this.lang === 'pascal') { this.linha(`    ${nome}: ${dims.map(d => `array[0..${d - 1}] of `).join('')}${this.tipoDestino(tipo)};`); return; }
     if (['c', 'cpp'].includes(this.lang)) { this.linha(`${this.tipoDestino(tipo)} ${nome}${dims.map(d => `[${d}]`).join('')} = ${dims.length ? (this.lang === 'cpp' ? '{}' : '{0}') : this.lang === 'c' && tipo === 'text' ? '{""}' : this.padrao(tipo)};`); return; }
     if (this.lang === 'java') { this.linha(`static ${this.tipoDestino(tipo)}${'[]'.repeat(dims.length)} ${nome} = ${dims.length ? `new ${this.tipoDestino(tipo)}${dims.map(d => `[${d}]`).join('')}` : this.padrao(tipo)};`); return; }
@@ -299,7 +383,10 @@ export class TranspiladorMultilinguagem {
       case 'Bloco': this.bloco(no); break;
       case 'Fim': break;
       case 'Escreva': this.escrever(no); break;
-      case 'Ler': this.linha(`${this.expr(no.variavel)} ${this.lang === 'pascal' ? ':=' : '='} ${this.ler(this.tipo(no.variavel))}${fim}`); break;
+      case 'Ler': {
+        if (this.cNativo) { this.lerCNativo(no); break; }
+        this.linha(`${this.expr(no.variavel)} ${this.lang === 'pascal' ? ':=' : '='} ${this.ler(this.tipo(no.variavel))}${fim}`); break;
+      }
       case 'Atribuicao': case 'AtribuicaoArray': this.linha(this.expr(no) + fim); break;
       case 'Chamada': case 'ChamadaModulo': this.linha(this.expr(no) + fim); break;
       case 'Se': {
@@ -354,6 +441,28 @@ export class TranspiladorMultilinguagem {
     if (this.lang === 'ruby') return `${tipo === 'int' ? 'Integer' : 'Float'}(${raw})`;
     return `${tipo === 'int' ? 'Number.parseInt' : 'Number'}(${raw}${tipo === 'int' ? ', 10' : ''})`;
   }
+
+  lerCNativo(no) {
+    const alvo = this.expr(no.variavel), tipo = this.tipo(no.variavel);
+    if (tipo === 'text') {
+      this.linha(`if (fgets(${alvo}, sizeof(${alvo}), stdin) == NULL) exit(1);`);
+      this.linha(`${alvo}[strcspn(${alvo}, "\\r\\n")] = '\\0';`);
+    } else if (tipo === 'bool') {
+      this.linha('{'); this.nivel++;
+      this.linha('char valor[16];');
+      if (this.leituraTexto) {
+        this.linha('if (fgets(valor, sizeof(valor), stdin) == NULL) exit(1);');
+        this.linha('valor[strcspn(valor, "\\r\\n")] = \'\\0\';');
+      } else this.linha('if (scanf("%15s", valor) != 1) exit(1);');
+      this.linha(`${alvo} = strcmp(valor, "verdadeiro") == 0;`);
+      this.nivel--; this.linha('}');
+    } else if (this.leituraTexto) {
+      this.linha('if (fgets(entrada, sizeof(entrada), stdin) == NULL) exit(1);');
+      this.linha(`${alvo} = ${tipo === 'int' ? 'strtoll(entrada, NULL, 10)' : 'strtod(entrada, NULL)'};`);
+    } else {
+      this.linha(`if (scanf("${tipo === 'int' ? '%lld' : '%lf'}", &${alvo}) != 1) exit(1);`);
+    }
+  }
   paraTexto(no) {
     const valor = this.expr(no), tipo = this.tipo(no);
     if (tipo === 'text') return valor;
@@ -362,16 +471,46 @@ export class TranspiladorMultilinguagem {
     if (this.lang === 'cpp') return tipo === 'bool' ? `std::string(${valor} ? "verdadeiro" : "falso")` : `maplerNumero(${valor})`;
     if (this.lang === 'java') return tipo === 'bool' ? `(${valor} ? "verdadeiro" : "falso")` : tipo === 'real' ? `maplerNumero(${valor})` : `String.valueOf(${valor})`;
     if (this.lang === 'pascal') return `${tipo === 'bool' ? 'maplerBool' : tipo === 'int' ? 'IntToStr' : 'FloatToStr'}(${valor})`;
+    if (tipo === 'int') {
+      if (this.lang === 'python') return `str(${valor})`;
+      if (this.lang === 'ruby') return `(${valor}).to_s`;
+      return `String(${valor})`;
+    }
     if (this.lang === 'python' || this.lang === 'ruby') return `mapler_texto(${valor})`;
     return `maplerTexto(${valor})`;
   }
   escrever(no) {
     if (this.lang === 'c') {
-      for (const e of no.expressoes) this.linha(`fputs(${this.paraTexto(e)}.dados, stdout);`);
-      this.linha('putchar(\'\\n\');'); return;
+      let temChamada = false;
+      this.visitarNos(no.expressoes, e => { if (['Chamada', 'ChamadaModulo', 'Atribuicao', 'AtribuicaoArray'].includes(e.tipo)) temChamada = true; });
+      if (this.cNativo && !temChamada && !(no.expressoes.length === 1 && no.expressoes[0].tipo === 'Literal' && typeof no.expressoes[0].valor === 'string')) {
+        const argumentos = [];
+        const formato = no.expressoes.map(e => {
+          if (e.tipo === 'Literal' && typeof e.valor === 'string') return e.valor.replaceAll('%', '%%');
+          const tipo = this.tipo(e), valor = this.expr(e);
+          argumentos.push(tipo === 'int' ? `(long long)(${valor})` : tipo === 'real' ? `(double)(${valor})` : tipo === 'bool' ? `${valor} ? "verdadeiro" : "falso"` : valor);
+          return tipo === 'int' ? '%lld' : tipo === 'real' ? '%.15g' : '%s';
+        }).join('') + '\n';
+        this.linha(`printf(${JSON.stringify(formato)}${argumentos.length ? ', ' + argumentos.join(', ') : ''});`);
+        return;
+      }
+      if (no.expressoes.length === 1 && no.expressoes[0].tipo === 'Literal' && typeof no.expressoes[0].valor === 'string') {
+        this.linha(`puts(${JSON.stringify(no.expressoes[0].valor)});`);
+      } else {
+        // Uma expressão por instrução preserva a ordem de avaliação do Portugol.
+        for (const e of no.expressoes) {
+          const tipo = this.tipo(e);
+          if (tipo === 'int') this.linha(`printf("%lld", (long long)(${this.expr(e)}));`);
+          else if (tipo === 'real') this.linha(`printf("%.15g", (double)(${this.expr(e)}));`);
+          else if (tipo === 'bool') this.linha(`fputs(${this.expr(e)} ? "verdadeiro" : "falso", stdout);`);
+          else this.linha(`fputs(${e.tipo === 'Literal' ? JSON.stringify(e.valor) : `${this.expr(e)}${this.cNativo ? '' : '.dados'}`}, stdout);`);
+        }
+        this.linha('putchar(\'\\n\');');
+      }
+      return;
     }
     if (this.lang === 'cpp') {
-      this.linha(`std::cout${no.expressoes.map(e => ` << ${this.tipo(e) === 'bool' ? this.paraTexto(e) : this.expr(e)}`).join('')} << std::endl;`); return;
+      this.linha(`std::cout${no.expressoes.map(e => ` << ${e.tipo === 'Literal' && typeof e.valor === 'string' ? JSON.stringify(e.valor) : this.tipo(e) === 'bool' ? this.paraTexto(e) : this.expr(e)}`).join('')} << std::endl;`); return;
     }
     const args = no.expressoes.map(e => this.paraTexto(e));
     if (this.lang === 'pascal') this.linha(`WriteLn(${args.join(', ')});`);
@@ -397,11 +536,13 @@ export class TranspiladorMultilinguagem {
           return this.lang === 'java' ? `(int)(${valor})` : valor;
         });
         const alvo = this.nome(no.nome.lexema) + (this.lang === 'pascal' ? `[${indices.join(', ')}]` : indices.map(i => `[${i}]`).join(''));
+        if (no.tipo === 'AtribuicaoArray' && this.cNativo && simbolo.tipo === 'text') return `snprintf(${alvo}, sizeof(${alvo}), "%s", ${this.valorCompativel(no.valor, simbolo.tipo)})`;
         return no.tipo === 'VariavelArray' ? alvo : `${alvo} ${this.lang === 'pascal' ? ':=' : '='} ${this.valorCompativel(no.valor, simbolo.tipo)}`;
       }
       case 'Atribuicao': {
         const simbolo = this.simbolo(no);
         if (simbolo.dimensoes.length) this.falha(no, 'Use índices para atribuir um elemento do vetor.');
+        if (this.cNativo && simbolo.tipo === 'text') return `snprintf(${this.nome(no.nome.lexema)}, sizeof(${this.nome(no.nome.lexema)}), "%s", ${this.valorCompativel(no.valor, simbolo.tipo)})`;
         return `${this.nome(no.nome.lexema)} ${this.lang === 'pascal' ? ':=' : '='} ${this.valorCompativel(no.valor, simbolo.tipo)}`;
       }
       case 'Grupo': return `(${this.expr(no.expressao)})`;
@@ -422,7 +563,7 @@ export class TranspiladorMultilinguagem {
           return this.lang === 'c' ? `maplerConcat(${ea}, ${eb})` : `(${ea} + ${eb})`;
         }
         if (['IGUAL', 'DIFERENTE', 'MAIOR_QUE', 'MAIOR_IGUAL', 'MENOR_QUE', 'MENOR_IGUAL'].includes(op) && ta === 'text' && tb === 'text') {
-          if (this.lang === 'c') return `(strcmp(${a}.dados, ${b}.dados) ${OPS[op]} 0)`;
+          if (this.lang === 'c') return `(strcmp(${a}${this.cNativo ? '' : '.dados'}, ${b}${this.cNativo ? '' : '.dados'}) ${OPS[op]} 0)`;
           if (this.lang === 'java') return `(${a}.compareTo(${b}) ${OPS[op]} 0)`;
         }
         if (op === 'POTENCIA') {

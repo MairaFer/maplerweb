@@ -70,3 +70,49 @@ test('linguagem inválida e identificador não declarado geram diagnóstico', as
   assert.match((await processar({ codigo: 'inicio fim', linguagem: 'desconhecida' }, 'traduzir')).erro, /não suportada/);
   assert.throws(() => gerar('inicio escrever ausente; fim', 'java'), /não declarada/);
 });
+
+test('Olá mundo em C contém somente a estrutura e a impressão necessárias', () => {
+  const codigo = gerar('inicio escrever "Olá, mundo!"; fim', 'c');
+  assert.equal(codigo, '#include <stdio.h>\n\nint main(void) {\n    puts("Olá, mundo!");\n    return 0;\n}\n');
+});
+
+test('nenhum destino inclui auxiliares ou leitura em um programa de saída literal', () => {
+  for (const linguagem of Object.keys(LINGUAGENS)) {
+    const codigo = gerar('inicio escrever "Olá, mundo!"; fim', linguagem);
+    assert.doesNotMatch(codigo, /mapler|MaplerTexto|Scanner|readFileSync|import math|Gerado pelo/);
+  }
+});
+
+test('leitura de nome usa char e fgets sem infraestrutura auxiliar', () => {
+  const codigo = gerar('variaveis nome: cadeia; inicio ler nome; escrever nome; fim', 'c');
+  assert.match(codigo, /char nome\[4096\]/);
+  assert.match(codigo, /fgets\(nome/);
+  assert.match(codigo, /strcspn/);
+  assert.doesNotMatch(codigo, /MaplerTexto|maplerLer|maplerTexto|typedef|math.h|stdbool.h/);
+});
+
+test('soma de inteiros usa scanf sem conversão intermediária de texto', () => {
+  const codigo = gerar('variaveis a, b: inteiro; inicio ler a; ler b; escrever a + b; fim', 'c');
+  assert.match(codigo, /scanf\("%lld", &a\)/);
+  assert.match(codigo, /scanf\("%lld", &b\)/);
+  assert.doesNotMatch(codigo, /MaplerTexto|maplerLer|typedef|strtoll|string.h/);
+});
+
+test('leitura numérica seguida de texto preserva linhas vazias e espaços', () => {
+  const codigo = gerar('variaveis a: inteiro; nome: cadeia; inicio ler a; ler nome; escrever a, nome; fim', 'c');
+  assert.match(codigo, /fgets\(entrada/);
+  assert.match(codigo, /fgets\(nome/);
+  assert.doesNotMatch(codigo, /scanf|MaplerTexto/);
+});
+
+test('concatenação complexa mantém somente os auxiliares usados', () => {
+  const codigo = gerar('variaveis nome: cadeia; inicio nome <- "valor=" + 2; escrever nome; fim', 'c');
+  assert.match(codigo, /MaplerTexto maplerConcat/);
+  assert.doesNotMatch(codigo, /maplerLer\(void\)|maplerInteiro/);
+});
+
+test('nome de auxiliar dentro de texto não cria uma dependência', () => {
+  const codigo = gerar('inicio escrever "maplerInteiro maplerTexto"; fim', 'c');
+  assert.doesNotMatch(codigo, /typedef|double|long long|math.h/);
+  assert.match(codigo, /puts\("maplerInteiro maplerTexto"\)/);
+});
